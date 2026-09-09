@@ -1,0 +1,117 @@
+# ===========================================================================
+# Airline Data Platform CI  (owner: Person 7, Platform / DevOps)
+#
+# Spins up the same two Postgres images docker-compose.yml uses - GitHub
+# Actions service containers ARE Docker containers - then runs the whole
+# pipeline end to end before `make test`. A green build therefore proves the
+# migrations apply, the seed loads, the transform rejects what it should, the
+# star schema loads and referential integrity holds.
+# ===========================================================================
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    name: ELT pipeline + tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres_oltp:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: airline
+          POSTGRES_PASSWORD: airline
+          POSTGRES_DB: airline_oltp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U airline -d airline_oltp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      postgres_dw:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: airline
+          POSTGRES_PASSWORD: airline
+          POSTGRES_DB: airline_dw
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U airline -d airline_dw"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      OLTP_DB_URL: postgresql+psycopg2://airline:airline@localhost:5432/airline_oltp
+      DW_DB_URL: postgresql+psycopg2://airline:airline@localhost:5433/airline_dw
+      SERVICE_DATE: "2026-09-09"
+      DURATION_TOLERANCE_MINUTES: "0"
+      LOG_LEVEL: INFO
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Wait for both databases
+        run: python scripts/wait_for_db.py
+
+      - name: Apply migrations (OLTP, staging, warehouse)
+        run: make migrate
+
+      - name: Seed the OLTP with mock DL857 operations
+        run: make seed
+
+      - name: Extract OLTP -> staging
+        run: make extract
+
+      - name: Transform (validate / standardise / deduplicate)
+        run: make transform
+
+      - name: Load the star schema
+        run: make load
+
+      - name: Run the test suite
+        run: make test
+
+      - name: Build the BI mart
+        run: |
+          python - <<'PY'
+          import config
+          from scripts.check_integrity import statements
+          sql = (config.PROJECT_ROOT / "bi/marts/route_analytics.sql").read_text()
+          with config.dw_engine().begin() as conn:
+              for statement in statements(sql):
+                  conn.exec_driver_sql(statement)
+          print("route_analytics executed")
+          PY
+
+      - name: Upload ELT artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: elt-artifacts
+          path: data/*.csv
+          if-no-files-found: warn

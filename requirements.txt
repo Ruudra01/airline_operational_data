@@ -1,0 +1,9 @@
+# Core ELT stack
+psycopg2-binary==2.9.9
+SQLAlchemy==2.0.35
+pandas==2.2.3
+python-dotenv==1.0.1
+
+# Testing / data quality
+pytest==8.3.3
+great-expectations==0.18.19

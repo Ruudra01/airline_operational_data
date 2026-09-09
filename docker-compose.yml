@@ -1,0 +1,71 @@
+# ---------------------------------------------------------------------------
+# Airline Data Platform - local development stack (owner: Person 7, Platform)
+#
+#   postgres_oltp : 3NF operational database (source system)
+#   postgres_dw   : star-schema data warehouse (target)
+#   adminer       : browser UI to inspect BOTH databases (http://localhost:8080)
+#
+# Usage:  make setup   (== docker compose up -d + wait + migrate)
+# ---------------------------------------------------------------------------
+name: airline-data-platform
+
+services:
+  postgres_oltp:
+    image: postgres:16-alpine
+    container_name: airline_postgres_oltp
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${OLTP_DB_USER:-airline}
+      POSTGRES_PASSWORD: ${OLTP_DB_PASSWORD:-airline}
+      POSTGRES_DB: ${OLTP_DB_NAME:-airline_oltp}
+      # Deterministic collation so ORDER BY in tests is stable across machines.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "${OLTP_DB_PORT:-5432}:5432"
+    volumes:
+      - oltp_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${OLTP_DB_USER:-airline} -d ${OLTP_DB_NAME:-airline_oltp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgres_dw:
+    image: postgres:16-alpine
+    container_name: airline_postgres_dw
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DW_DB_USER:-airline}
+      POSTGRES_PASSWORD: ${DW_DB_PASSWORD:-airline}
+      POSTGRES_DB: ${DW_DB_NAME:-airline_dw}
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "${DW_DB_PORT:-5433}:5432"
+    volumes:
+      - dw_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DW_DB_USER:-airline} -d ${DW_DB_NAME:-airline_dw}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  adminer:
+    image: adminer:4
+    container_name: airline_adminer
+    restart: unless-stopped
+    ports:
+      - "${ADMINER_PORT:-8080}:8080"
+    environment:
+      # Pre-select the OLTP server in the login form; switch the "Server" field
+      # to `postgres_dw` to inspect the warehouse.
+      ADMINER_DEFAULT_SERVER: postgres_oltp
+      ADMINER_DESIGN: pepa-linha
+    depends_on:
+      postgres_oltp:
+        condition: service_healthy
+      postgres_dw:
+        condition: service_healthy
+
+volumes:
+  oltp_data:
+  dw_data:
